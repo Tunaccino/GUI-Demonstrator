@@ -1,12 +1,14 @@
 #include "controller.h"
 
 #include "demorun.h"
+#include "knobinput.h"
 #include "plotview.h"
 #include "ui_Controller.h"
 
 #include <QCoreApplication>
 #include <QGroupBox>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPixmap>
 
 namespace {
@@ -21,6 +23,7 @@ Controller::Controller(QWidget *parent)
     : QDialog(parent)
     , ui(new Ui::dialog)
     , m_demo(new DemoRun(this))
+    , m_knob(new KnobInput(this))
 {
     ui->setupUi(this);
 
@@ -49,6 +52,8 @@ Controller::Controller(QWidget *parent)
             [this] { ui->demoButton->setText(tr("Probelauf")); });
 
     connect(m_demo, &DemoRun::sample, this, &Controller::showSample);
+
+    setupKnob();
 
     resetAll();
 }
@@ -179,4 +184,64 @@ void Controller::showSample(double t, double motorDeg, double gearDeg, double po
     ui->valueGearEncoder->setText(QString::number(qRound(gearDeg * kGearTicksPerDegree)));
     ui->valueVelocity->setText(QString::number(velocity, 'f', 2) + QStringLiteral(" \u00B0/s"));
     ui->valueAcceleration->setText(QString::number(acceleration, 'f', 2) + QStringLiteral(" \u00B0/s\u00B2"));
+}
+
+// --- Drehgeber -------------------------------------------------------------
+
+void Controller::setupKnob()
+{
+    // Reihenfolge beim Durchschalten per Druck. Schrittweite und Grenzen
+    // hier nach Bedarf anpassen.
+    m_knobFields = {
+        {ui->lineEdit_3, 1.0, 0.0, 1000.0},    // P
+        {ui->lineEdit_2, 1.0, 0.0, 1000.0},    // I
+        {ui->lineEdit,   0.5, 0.0, 1000.0},    // D
+        {ui->lineEdit_4, 1.0, -360.0, 360.0},  // Goal in Grad
+    };
+
+    connect(m_knob, &KnobInput::pressed, this, &Controller::selectNextKnobField);
+    connect(m_knob, &KnobInput::rotated, this, &Controller::adjustKnobField);
+
+    // Mit Drehgeber ist von Anfang an das erste Feld aktiv, damit man sieht,
+    // was das Drehen gerade veraendert.
+    if (m_knob->isAvailable())
+        m_knobFields[m_knobIndex].edit->setFocus();
+}
+
+// Wurde zwischendurch mit Maus oder Tastatur ein anderes Feld angeklickt,
+// macht der Drehgeber dort weiter.
+void Controller::syncKnobIndexToFocus()
+{
+    for (int i = 0; i < m_knobFields.size(); ++i) {
+        if (m_knobFields[i].edit->hasFocus()) {
+            m_knobIndex = i;
+            return;
+        }
+    }
+}
+
+void Controller::selectNextKnobField()
+{
+    syncKnobIndexToFocus();
+    m_knobIndex = (m_knobIndex + 1) % m_knobFields.size();
+    m_knobFields[m_knobIndex].edit->setFocus();
+}
+
+void Controller::adjustKnobField(int steps)
+{
+    syncKnobIndexToFocus();
+    const KnobField &field = m_knobFields[m_knobIndex];
+    field.edit->setFocus();
+
+    // Auch "1,5" mit Komma soll funktionieren, falls jemand von Hand tippt.
+    QString text = field.edit->text();
+    text.replace(QLatin1Char(','), QLatin1Char('.'));
+
+    double value = text.toDouble();
+    value = qBound(field.min, value + steps * field.step, field.max);
+    field.edit->setText(QString::number(value, 'f', 1));
+
+    // Die Zielposition wirkt sofort, wie nach einem Klick auf "Uebernehmen".
+    if (field.edit == ui->lineEdit_4)
+        applyGoal();
 }

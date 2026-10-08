@@ -28,6 +28,8 @@ qt_add_executable(Controller
     plotview.h
     demorun.cpp
     demorun.h
+    knobinput.cpp
+    knobinput.h
 )
 
 target_link_libraries(Controller PRIVATE Qt6::Widgets)
