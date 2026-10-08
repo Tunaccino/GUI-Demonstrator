@@ -1,0 +1,5 @@
+/home/max/GUI-Demonstrator/build/CMakeFiles/Controller.dir
+/home/max/GUI-Demonstrator/build/CMakeFiles/edit_cache.dir
+/home/max/GUI-Demonstrator/build/CMakeFiles/rebuild_cache.dir
+/home/max/GUI-Demonstrator/build/CMakeFiles/Controller_autogen_timestamp_deps.dir
+/home/max/GUI-Demonstrator/build/CMakeFiles/Controller_autogen.dir
