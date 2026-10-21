@@ -11,6 +11,7 @@ QT_END_NAMESPACE
 
 class DemoRun;
 class KnobInput;
+class QLabel;
 class QLineEdit;
 
 class Controller : public QDialog
@@ -30,23 +31,24 @@ private:
     void showSample(double t, double motorDeg, double gearDeg, double positionDeg,
                     double velocity, double acceleration);
 
-    // Bedienung per Drehgeber: Druecken waehlt das naechste Feld,
-    // Drehen aendert dessen Wert.
-    void setupKnob();
-    void selectNextKnobField();
-    void adjustKnobField(int steps);
-    void syncKnobIndexToFocus();
+    // Bedienung per Drehgeber: jeder Knopf gehoert fest zu einem Feld.
+    void setupKnobs();
+    void turnKnob(int index, int steps);
+    void pressKnob(int index);
 
     Ui::dialog *ui;
     DemoRun *m_demo;
 
-    struct KnobField {
+    struct Knob {
+        int clkGpio;
+        int swGpio;
         QLineEdit *edit;
-        double step; // Aenderung pro Rastschritt
+        QLabel *label;     // Beschriftung, zeigt "x10" im Grobmodus; nullptr = keine
+        double step;       // Aenderung pro Rastschritt
         double min;
         double max;
+        bool coarse = false;
+        QString labelText; // urspruengliche Beschriftung
     };
-    QList<KnobField> m_knobFields;
-    int m_knobIndex = 0;
-    KnobInput *m_knob;
+    QList<Knob> m_knobs;
 };

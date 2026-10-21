@@ -6,7 +6,7 @@
 class QSocketNotifier;
 
 /**
- * Drehgeber (KY-040) als Eingabe fuer die GUI.
+ * Ein Drehgeber (KY-040) samt Taster als Eingabe fuer die GUI.
  *
  * Die eigentliche Auswertung macht der Linux-Kernel ueber die Overlays
  * rotary-encoder und gpio-key (Eintraege in /boot/firmware/config.txt).
@@ -14,20 +14,25 @@ class QSocketNotifier;
  * als Qt-Signale. Sie laeuft in der normalen Ereignisschleife, ein eigener
  * Thread ist nicht noetig.
  *
- * Gesucht wird automatisch nach /dev/input/by-path/platform-rotary@*-event
- * und platform-button@*-event, es ist also egal, welche GPIOs belegt sind.
- * Ohne Drehgeber (oder unter Windows/macOS) tut die Klasse einfach nichts.
+ * Jede Instanz gehoert zu genau einem Drehgeber. Welcher das ist, ergibt sich
+ * aus den GPIO-Nummern von CLK und SW: Die Overlays legen die Geraete als
+ * /dev/input/by-path/platform-rotary@<CLK hex>-event bzw.
+ * platform-button@<SW hex>-event an.
+ *
+ * Fehlt ein Geraet (oder laeuft das Programm nicht unter Linux), tut die
+ * Instanz einfach nichts.
  */
 class KnobInput : public QObject
 {
     Q_OBJECT
 
 public:
-    explicit KnobInput(QObject *parent = nullptr);
+    /** swGpio < 0 bedeutet: Drehgeber ohne Taster. */
+    KnobInput(int clkGpio, int swGpio, QObject *parent = nullptr);
     ~KnobInput() override;
 
-    /** true, wenn mindestens ein Geraet (Drehgeber oder Taster) geoeffnet ist. */
-    bool isAvailable() const { return !m_fds.isEmpty(); }
+    bool hasRotary() const { return m_hasRotary; }
+    bool hasButton() const { return m_hasButton; }
 
 signals:
     /** +1 bzw. -1 pro Rastschritt, je nach Drehrichtung. */
@@ -37,9 +42,11 @@ signals:
     void pressed();
 
 private:
-    void openDevice(const QString &path);
+    bool openDevice(const QString &path);
     void readEvents(int fd);
 
     QList<int> m_fds;
     QList<QSocketNotifier *> m_notifiers;
+    bool m_hasRotary = false;
+    bool m_hasButton = false;
 };

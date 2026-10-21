@@ -4,7 +4,7 @@
 #include <QSocketNotifier>
 
 #ifdef Q_OS_LINUX
-#include <QDir>
+#include <QFileInfo>
 
 #include <cerrno>
 #include <cstring>
@@ -14,22 +14,28 @@
 #include <unistd.h>
 #endif
 
-KnobInput::KnobInput(QObject *parent)
+namespace {
+
+QString devicePath(const char *kind, int gpio)
+{
+    // Die Overlays benennen die Geraete nach der GPIO-Nummer in Hex,
+    // z. B. GPIO21 -> platform-rotary@15-event.
+    return QStringLiteral("/dev/input/by-path/platform-%1@%2-event")
+        .arg(QLatin1String(kind), QString::number(gpio, 16));
+}
+
+} // namespace
+
+KnobInput::KnobInput(int clkGpio, int swGpio, QObject *parent)
     : QObject(parent)
 {
 #ifdef Q_OS_LINUX
-    // Die Overlays legen Geraete an, deren Name die GPIO-Nummer in Hex enthaelt,
-    // z. B. platform-rotary@11-event (GPIO17) und platform-button@1b-event (GPIO27).
-    const QDir dir(QStringLiteral("/dev/input/by-path"));
-    const QStringList names = dir.entryList(
-        {QStringLiteral("platform-rotary@*-event"), QStringLiteral("platform-button@*-event")},
-        QDir::Files | QDir::System);
-
-    for (const QString &name : names)
-        openDevice(dir.filePath(name));
-
-    if (m_fds.isEmpty())
-        qInfo("Kein Drehgeber gefunden - Bedienung nur per Maus/Tastatur.");
+    m_hasRotary = openDevice(devicePath("rotary", clkGpio));
+    if (swGpio >= 0)
+        m_hasButton = openDevice(devicePath("button", swGpio));
+#else
+    Q_UNUSED(clkGpio);
+    Q_UNUSED(swGpio);
 #endif
 }
 
@@ -43,18 +49,24 @@ KnobInput::~KnobInput()
 #endif
 }
 
-void KnobInput::openDevice(const QString &path)
+bool KnobInput::openDevice(const QString &path)
 {
 #ifdef Q_OS_LINUX
+    if (!QFileInfo::exists(path)) {
+        qWarning().noquote() << "Nicht gefunden:" << path
+                             << "- Eintrag in config.txt pruefen und neu starten.";
+        return false;
+    }
+
     const int fd = ::open(path.toLocal8Bit().constData(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0) {
         qWarning().noquote() << "Kann" << path << "nicht oeffnen:" << std::strerror(errno)
                              << "(Benutzer in der Gruppe 'input'?)";
-        return;
+        return false;
     }
 
     // Exklusiv belegen: Solange die GUI laeuft, sieht der Desktop die
-    // Ereignisse nicht. Sonst koennte der Taster z. B. als Tastendruck
+    // Ereignisse nicht. Sonst koennte ein Taster z. B. als Tastendruck
     // im gerade aktiven Fenster landen.
     ::ioctl(fd, EVIOCGRAB, 1);
 
@@ -64,9 +76,11 @@ void KnobInput::openDevice(const QString &path)
     connect(notifier, &QSocketNotifier::activated, this, [this, fd] { readEvents(fd); });
     m_notifiers.append(notifier);
 
-    qInfo().noquote() << "Drehgeber-Geraet geoeffnet:" << path;
+    qInfo().noquote() << "Geoeffnet:" << path;
+    return true;
 #else
     Q_UNUSED(path);
+    return false;
 #endif
 }
 
