@@ -1,5 +1,6 @@
 #include "plotview.h"
 
+#include <QGraphicsEllipseItem>
 #include <QGraphicsPixmapItem>
 #include <QGraphicsScene>
 #include <QGraphicsSimpleTextItem>
@@ -10,32 +11,17 @@
 
 namespace {
 
-// Farben aus der DARE-Farbpalette, jeweils fuer den Zweck, den die Palette
-// ihnen zuweist. Welcher Satz gilt, haengt vom Grund ab: auf Eloxal 900 tragen
-// nur die hellen Stufen, auf Kapton 050 nur die dunklen.
-const PlotColors kEloxalColors{
-    QColor("#22262D"), // Eloxal 900, Foliengrund
-    QColor("#535A66"), // Eloxal 700
-    QColor("#9DA4AE"), // Eloxal 300
-    QColor("#686F7A"), // Eloxal 500
-    QColor("#CC9300"), // Kapton 500, die Marke
-    QColor("#E3B64D"), // Kapton 300, zweite Datenreihe
-    QColor("#9DA4AE"), // Eloxal 300
-    QColor("#FFFFFF"), // Weiss, Hauptkurve
+// Farben aus der DARE-Farbpalette fuer den dunklen Grund (Eloxal 900).
+const PlotColors kColors{
+    QColor("#22262D"),             // Eloxal 900, Foliengrund
+    QColor(0x53, 0x5A, 0x66, 140), // Eloxal 700, so leise wie das Raster der Folien
+    QColor("#9DA4AE"),             // Eloxal 300, Beschriftungen
+    QColor("#686F7A"),             // Eloxal 500, Bahnenden
+    QColor("#CC9300"),             // Kapton 500, die Marke: Sollposition
+    QColor("#FFFFFF"),             // Weiss, Ballposition
 };
 
-const PlotColors kKaptonColors{
-    QColor("#F6E4BB"), // Kapton 100, hinterlegte Flaeche
-    QColor("#E3B64D"), // Kapton 300, Gitter - bewusst leise
-    QColor("#686F7A"), // Eloxal 500, Beschriftungen
-    QColor("#9DA4AE"), // Eloxal 300, Linien und Inaktives
-    QColor("#8A6300"), // Kapton 700, goldener Text auf hellem Grund
-    QColor("#A87A00"), // Kapton 600, grosse Zahlen und Diagramme
-    QColor("#535A66"), // Eloxal 700
-    QColor("#22262D"), // Eloxal 900, Hauptkurve
-};
-
-/** Liefert eine "runde" Schrittweite (1, 2, 5 x 10^n) fuer die Achsbeschriftung. */
+/** Liefert eine "runde" Schrittweite (1, 2, 5 x 10^n) fuer die Zeitachse. */
 double niceStep(double range, int targetTicks)
 {
     if (range <= 0.0 || targetTicks < 1)
@@ -69,22 +55,20 @@ QGraphicsSimpleTextItem *makeLabel(QGraphicsScene *scene, const QString &text,
     return item;
 }
 
+/** Zahl mit Vorzeichen, wie man es fuer eine Lage um die Mitte erwartet. */
+QString signedNumber(double value, int decimals)
+{
+    if (std::abs(value) < 0.5 * std::pow(10.0, -decimals))
+        value = 0.0;
+    QString text = QString::number(value, 'f', decimals);
+    if (value > 0.0)
+        text.prepend(QLatin1Char('+'));
+    else if (value < 0.0)
+        text.replace(0, 1, QChar(0x2212)); // echtes Minuszeichen
+    return text;
+}
+
 } // namespace
-
-const PlotColors &PlotView::colors() const
-{
-    return m_theme == Theme::Kapton ? kKaptonColors : kEloxalColors;
-}
-
-void PlotView::setTheme(Theme theme)
-{
-    if (m_theme == theme)
-        return;
-
-    m_theme = theme;
-    setBackgroundBrush(colors().background);
-    rebuild();
-}
 
 PlotView::PlotView(QWidget *parent)
     : QGraphicsView(parent)
@@ -96,7 +80,7 @@ PlotView::PlotView(QWidget *parent)
     setFrameShape(QFrame::NoFrame);
     setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    setBackgroundBrush(colors().background);
+    setBackgroundBrush(kColors.background);
     setCacheMode(QGraphicsView::CacheNone);
 
     m_repaintClock.start();
@@ -110,12 +94,22 @@ void PlotView::setWatermark(const QPixmap &pixmap)
     rebuild();
 }
 
-void PlotView::setGoal(double degrees)
+void PlotView::setTrack(double minimum, double maximum)
 {
-    if (qFuzzyCompare(m_goal, degrees))
-        return;
+    m_trackMin = qMin(minimum, maximum);
+    m_trackMax = qMax(minimum, maximum);
+    rebuild();
+}
 
-    m_goal = degrees;
+void PlotView::setSetpoint(double value)
+{
+    m_setpoint = value;
+    rebuild();
+}
+
+void PlotView::setUnit(const QString &unit)
+{
+    m_unit = unit;
     rebuild();
 }
 
@@ -131,9 +125,9 @@ void PlotView::clearData()
     rebuild();
 }
 
-void PlotView::appendSample(double t, double motorDeg, double gearDeg, double positionDeg)
+void PlotView::appendSample(double t, double value)
 {
-    m_samples.append(Sample{t, motorDeg, gearDeg, positionDeg});
+    m_samples.append(Sample{t, value});
 
     // Ringpuffer: bei Dauerbetrieb nicht unbegrenzt wachsen lassen.
     if (m_samples.size() > m_maxSamples)
@@ -159,6 +153,9 @@ QPointF PlotView::toScene(double t, double value) const
     const double tSpan = qMax(1e-9, m_tMax - m_tMin);
     const double ySpan = qMax(1e-9, m_yMax - m_yMin);
 
+    // Ausreisser (Sensorrauschen am Bahnende) bleiben im Bild.
+    value = qBound(m_yMin, value, m_yMax);
+
     const double x = m_plot.left() + (t - m_tMin) / tSpan * m_plot.width();
     const double y = m_plot.bottom() - (value - m_yMin) / ySpan * m_plot.height();
 
@@ -179,47 +176,34 @@ void PlotView::computeRanges()
             m_tMax = m_tMin + (m_window > 0.0 ? m_window : 1.0);
     }
 
-    // Startposition (0.0) und Ziel sind immer im Bild.
-    double lo = qMin(0.0, m_goal);
-    double hi = qMax(0.0, m_goal);
-
-    for (const Sample &s : m_samples) {
-        if (s.t < m_tMin)
-            continue;
-
-        lo = qMin(lo, qMin(s.pos, qMin(s.motor, s.gear)));
-        hi = qMax(hi, qMax(s.pos, qMax(s.motor, s.gear)));
-    }
-
-    double span = hi - lo;
-    if (span < 1e-6)
-        span = 1.0;
-
-    const double padding = span * 0.12;
-    m_yMin = lo - padding;
-    m_yMax = hi + padding;
+    // Fester Wertebereich: die Bahn plus ein schmaler Streifen jenseits der
+    // Enden, damit man sieht, wo die Bahn aufhoert.
+    const double span = qMax(1e-6, m_trackMax - m_trackMin);
+    const double margin = span * 0.08;
+    m_yMin = m_trackMin - margin;
+    m_yMax = m_trackMax + margin;
 }
 
 void PlotView::drawWatermark()
 {
-    if (m_watermark.isNull())
+    if (m_watermark.isNull() || m_watermark.height() <= 0)
         return;
 
-    // Mindestgroesse aus dem Logo Guide: unter 240 px Breite bricht die
-    // ROBOTICS-Subline auf. Passt das nicht in die Plotflaeche, bleibt das
-    // Wasserzeichen lieber ganz weg.
-    constexpr int kMinWidth = 240;
-
-    const int target = qMax(kMinWidth, qRound(m_plot.width() * 0.5));
-    if (target > m_plot.width() * 0.8)
+    // Die Bildmarke hat keinen Schriftzug, der aufbrechen koennte, und darf
+    // deshalb gross werden: drei Viertel der Plothoehe, hoechstens 80 % der
+    // Breite.
+    const double aspect = double(m_watermark.width()) / m_watermark.height();
+    const int target = qMin(qRound(m_plot.height() * 0.75 * aspect), qRound(m_plot.width() * 0.8));
+    if (target < 40)
         return;
 
     // Skalieren ist teuer, deshalb nur bei geaenderter Groesse.
     if (m_watermarkScaled.width() != target)
         m_watermarkScaled = m_watermark.scaledToWidth(target, Qt::SmoothTransformation);
 
+    // Auf dem dunklen Grund wirkt Weiss schnell zu laut, daher sehr blass.
     auto *item = m_scene->addPixmap(m_watermarkScaled);
-    item->setOpacity(0.10);
+    item->setOpacity(0.06);
     item->setPos(m_plot.center()
                  - QPointF(m_watermarkScaled.width() / 2.0,
                            m_watermarkScaled.height() / 2.0));
@@ -227,20 +211,25 @@ void PlotView::drawWatermark()
 
 void PlotView::drawGrid()
 {
-    const QPen gridPen(colors().grid, 1.0, Qt::SolidLine);
+    const QPen gridPen(kColors.grid, 1.0, Qt::SolidLine);
 
-    // Waagerechte Linien + Y-Beschriftung
-    const double yStep = niceStep(m_yMax - m_yMin, 5);
-    const double yFirst = std::ceil(m_yMin / yStep) * yStep;
-
-    for (double v = yFirst; v <= m_yMax + 1e-9; v += yStep) {
+    // Waagerechte Linien: die Bahn in sechs gleiche Abschnitte, bei 30 cm
+    // also alle 5 cm. So liegen beide Bahnenden und die Mitte auf Linien.
+    const double yStep = (m_trackMax - m_trackMin) / 6.0;
+    for (int i = 0; i <= 6; ++i) {
+        const double v = m_trackMin + i * yStep;
         const QPointF p = toScene(m_tMin, v);
         m_scene->addLine(m_plot.left(), p.y(), m_plot.right(), p.y(), gridPen);
 
-        auto *label = makeLabel(m_scene, QString::number(v, 'f', yStep < 1.0 ? 2 : 1), colors().axisText);
+        auto *label = makeLabel(m_scene, signedNumber(v, 1), kColors.axisText);
         label->setPos(m_plot.left() - label->boundingRect().width() - 8,
                       p.y() - label->boundingRect().height() / 2.0);
     }
+
+    // Einheit ueber der Y-Achse
+    auto *unit = makeLabel(m_scene, m_unit, kColors.axisText);
+    unit->setPos(m_plot.left() - unit->boundingRect().width() - 8,
+                 m_plot.top() - unit->boundingRect().height() - 4);
 
     // Senkrechte Linien + Zeitachse
     const double tStep = niceStep(m_tMax - m_tMin, 6);
@@ -250,43 +239,67 @@ void PlotView::drawGrid()
         const QPointF p = toScene(t, m_yMin);
         m_scene->addLine(p.x(), m_plot.top(), p.x(), m_plot.bottom(), gridPen);
 
-        auto *label = makeLabel(m_scene, QString::number(t, 'f', tStep < 1.0 ? 1 : 0) + " s", colors().axisText);
+        auto *label = makeLabel(m_scene, QString::number(t, 'f', tStep < 1.0 ? 1 : 0) + " s",
+                                kColors.axisText);
         label->setPos(p.x() - label->boundingRect().width() / 2.0, m_plot.bottom() + 6);
     }
 
     // Rahmen der Plotflaeche
-    m_scene->addRect(m_plot, QPen(colors().grid, 1.0), Qt::NoBrush);
+    m_scene->addRect(m_plot, QPen(kColors.grid, 1.0), Qt::NoBrush);
 }
 
-void PlotView::drawReferenceLines()
+void PlotView::drawTrack()
 {
-    // Startposition
-    const QPointF zero = toScene(m_tMin, 0.0);
-    if (zero.y() >= m_plot.top() && zero.y() <= m_plot.bottom()) {
-        m_scene->addLine(m_plot.left(), zero.y(), m_plot.right(), zero.y(),
-                         QPen(colors().zeroLine, 1.4, Qt::SolidLine));
+    // Jenseits der Bahnenden schraffiert, wie eine Sperrflaeche in einer
+    // technischen Zeichnung.
+    QColor hatch = kColors.trackEnd;
+    hatch.setAlpha(110);
+    const QBrush hatchBrush(hatch, Qt::BDiagPattern);
 
-        auto *label = makeLabel(m_scene, QStringLiteral("Start 0.0\u00B0"), colors().zeroLine);
-        label->setPos(m_plot.left() + 6, zero.y() - label->boundingRect().height() - 2);
-    }
+    const QPointF top = toScene(m_tMin, m_trackMax);
+    const QPointF bottom = toScene(m_tMin, m_trackMin);
 
-    // Zielposition
-    const QPointF goal = toScene(m_tMin, m_goal);
-    if (goal.y() >= m_plot.top() && goal.y() <= m_plot.bottom()) {
-        QPen goalPen(colors().goalLine, 1.4, Qt::DashLine);
-        goalPen.setDashPattern({6, 5});
-        m_scene->addLine(m_plot.left(), goal.y(), m_plot.right(), goal.y(), goalPen);
+    m_scene->addRect(QRectF(m_plot.left(), m_plot.top(), m_plot.width(), top.y() - m_plot.top()),
+                     Qt::NoPen, hatchBrush);
+    m_scene->addRect(QRectF(m_plot.left(), bottom.y(), m_plot.width(), m_plot.bottom() - bottom.y()),
+                     Qt::NoPen, hatchBrush);
 
-        auto *label = makeLabel(m_scene,
-                                QStringLiteral("Goal %1\u00B0").arg(m_goal, 0, 'f', 1),
-                                colors().goalLine);
-        label->setPos(m_plot.right() - label->boundingRect().width() - 6,
-                      goal.y() - label->boundingRect().height() - 2);
-    }
+    const QPen endPen(kColors.trackEnd, 1.4);
+    m_scene->addLine(m_plot.left(), top.y(), m_plot.right(), top.y(), endPen);
+    m_scene->addLine(m_plot.left(), bottom.y(), m_plot.right(), bottom.y(), endPen);
+
+    auto *label = makeLabel(m_scene, QStringLiteral("Bahnende"), kColors.axisText);
+    label->setPos(m_plot.right() - label->boundingRect().width() - 6,
+                  top.y() + 3);
 }
 
-void PlotView::addSeriesPath(double Sample::*member, const QColor &color, qreal width)
+void PlotView::drawSetpoint()
 {
+    const QPointF p = toScene(m_tMin, m_setpoint);
+
+    QPen pen(kColors.setpoint, 1.4, Qt::DashLine);
+    pen.setDashPattern({6, 5});
+    m_scene->addLine(m_plot.left(), p.y(), m_plot.right(), p.y(), pen);
+
+    auto *label = makeLabel(m_scene,
+                            QStringLiteral("Soll %1 %2").arg(signedNumber(m_setpoint, 1), m_unit),
+                            kColors.setpoint);
+    label->setPos(m_plot.right() - label->boundingRect().width() - 6,
+                  p.y() - label->boundingRect().height() - 2);
+}
+
+void PlotView::drawSeries()
+{
+    if (m_samples.isEmpty()) {
+        // Leerer Plot soll nicht kaputt aussehen: kurz sagen, worauf er wartet.
+        // Mittig zwischen Sollinie und unterem Bahnende, damit nichts kollidiert.
+        auto *hint = makeLabel(m_scene, QStringLiteral("Noch keine Messwerte"), kColors.axisText, 0);
+        const QRectF box = hint->boundingRect();
+        const QPointF anchor = toScene(m_tMin, (m_setpoint + m_trackMin) / 2.0);
+        hint->setPos(m_plot.center().x() - box.width() / 2.0, anchor.y() - box.height() / 2.0);
+        return;
+    }
+
     QPainterPath path;
     bool started = false;
 
@@ -298,7 +311,8 @@ void PlotView::addSeriesPath(double Sample::*member, const QColor &color, qreal 
         if (s.t < m_tMin && !(i + 1 < m_samples.size() && m_samples.at(i + 1).t >= m_tMin))
             continue;
 
-        const QPointF p = toScene(s.t, s.*member);
+        QPointF p = toScene(s.t, s.value);
+        p.setX(qMax(p.x(), m_plot.left()));
 
         if (!started) {
             path.moveTo(p);
@@ -311,47 +325,17 @@ void PlotView::addSeriesPath(double Sample::*member, const QColor &color, qreal 
     if (!started)
         return;
 
-    QPen pen(color, width);
+    QPen pen(kColors.ball, 2.0);
     pen.setCosmetic(true);
     pen.setJoinStyle(Qt::RoundJoin);
     pen.setCapStyle(Qt::RoundCap);
+    m_scene->addPath(path, pen);
 
-    auto *item = m_scene->addPath(path, pen);
-    item->setFlag(QGraphicsItem::ItemClipsToShape, false);
-}
-
-void PlotView::drawSeries()
-{
-    addSeriesPath(&Sample::motor, colors().motor, 1.4);
-    addSeriesPath(&Sample::gear, colors().gear, 1.4);
-    addSeriesPath(&Sample::pos, colors().position, 2.0);
-}
-
-void PlotView::drawLegend()
-{
-    struct Entry
-    {
-        QString text;
-        QColor color;
-    };
-
-    const QVector<Entry> entries = {
-        {QStringLiteral("Current Position"), colors().position},
-        {QStringLiteral("Motor Encoder"), colors().motor},
-        {QStringLiteral("Gear Encoder"), colors().gear},
-    };
-
-    qreal x = m_plot.left();
-    const qreal y = m_plot.bottom() + 24;
-
-    for (const Entry &e : entries) {
-        m_scene->addLine(x, y + 6, x + 16, y + 6, QPen(e.color, 2.0));
-
-        auto *label = makeLabel(m_scene, e.text, colors().axisText);
-        label->setPos(x + 22, y);
-
-        x += 22 + label->boundingRect().width() + 20;
-    }
+    // Der Ball selbst: ein Punkt am Ende der Kurve, dort wo er gerade liegt.
+    const QPointF head = toScene(m_samples.constLast().t, m_samples.constLast().value);
+    constexpr qreal r = 5.5;
+    m_scene->addEllipse(QRectF(head.x() - r, head.y() - r, 2 * r, 2 * r),
+                        QPen(kColors.background, 2.0), QBrush(kColors.ball));
 }
 
 void PlotView::rebuild()
@@ -365,15 +349,16 @@ void PlotView::rebuild()
     if (viewRect.width() < 120 || viewRect.height() < 80)
         return;
 
-    // Raender: links Y-Beschriftung, unten Zeitachse + Legende.
-    m_plot = viewRect.adjusted(56, 16, -16, -48);
+    // Raender: links Y-Beschriftung, oben die Einheit, unten die Zeitachse,
+    // rechts Platz fuer den Ballpunkt.
+    m_plot = viewRect.adjusted(58, 26, -18, -28);
     if (m_plot.width() < 40 || m_plot.height() < 40)
         return;
 
     computeRanges();
     drawWatermark();
     drawGrid();
-    drawReferenceLines();
+    drawTrack();
+    drawSetpoint();
     drawSeries();
-    drawLegend();
 }

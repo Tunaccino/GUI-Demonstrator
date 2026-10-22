@@ -2,7 +2,7 @@
 #
 # Richtet einen frischen Raspberry Pi fuer den GUI-Demonstrator mit vier
 # KY-040-Drehgebern ein:
-#   1. Pakete installieren (git, Compiler, CMake, Qt6)
+#   1. Pakete installieren (git, Compiler, CMake, Qt6 mit Svg)
 #   2. Code von GitHub holen
 #   3. Drehgeber in /boot/firmware/config.txt eintragen
 #   4. Programm bauen
@@ -38,7 +38,7 @@ APT_WAIT=(-o DPkg::Lock::Timeout=600)
 
 step "Pakete installieren"
 sudo apt-get "${APT_WAIT[@]}" update
-sudo apt-get "${APT_WAIT[@]}" install -y git cmake build-essential qt6-base-dev
+sudo apt-get "${APT_WAIT[@]}" install -y git cmake build-essential qt6-base-dev qt6-svg-dev
 
 # ---------------------------------------------------------------------------
 step "Code holen ($BRANCH)"
@@ -62,7 +62,7 @@ else
     #   1 = P:    21 / 20 / 16
     #   2 = I:    26 / 19 / 13
     #   3 = D:     6 /  5 /  0
-    #   4 = Goal: 11 /  9 / 10
+    #   4 = Motorwinkel: 11 /  9 / 10
     # Aenderungen hier muessen zu setupKnobs() in controller.cpp passen.
     sudo tee -a "$CONFIG" >/dev/null <<EOF
 

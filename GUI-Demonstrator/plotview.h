@@ -8,49 +8,47 @@
 
 class QGraphicsScene;
 
-/** Farbsatz eines Schemas, Werte aus der DARE-Farbpalette. */
+/** Farbsatz fuer den dunklen Foliengrund, Werte aus der DARE-Farbpalette. */
 struct PlotColors
 {
     QColor background;
     QColor grid;
     QColor axisText;
-    QColor zeroLine;
-    QColor goalLine;
-    QColor motor;
-    QColor gear;
-    QColor position;
+    QColor trackEnd;
+    QColor setpoint;
+    QColor ball;
 };
 
 /**
- * Rollender Linienplot fuer die Reglervisualisierung.
+ * Rollender Linienplot fuer die Ballposition auf der Bahn.
  *
  * Zeichnet direkt in die QGraphicsScene - keine Fremdbibliothek noetig.
- * Angezeigt werden: Startlinie bei 0.0, Ziellinie, sowie die Verlaeufe von
- * Motor-Encoder, Getriebe-Encoder und aktueller Position.
- *
- * Alle Werte werden in Grad erwartet. Encoder-Rohwerte (Ticks) bitte vorher
- * umrechnen, sonst liegen die Kurven um Groessenordnungen auseinander.
+ * Die Y-Achse ist fest auf die Bahn eingestellt (Standard -15 bis +15 cm),
+ * damit der Ball immer an derselben Stelle im Bild erscheint. Angezeigt
+ * werden: Bahnenden, Sollposition, Verlauf der Ballposition und ein Punkt
+ * fuer die aktuelle Lage des Balls.
  */
 class PlotView : public QGraphicsView
 {
     Q_OBJECT
 
 public:
-    /** Farbschema. Eloxal = dunkler Foliengrund, Kapton = goldener Grund. */
-    enum class Theme { Eloxal, Kapton };
-
     explicit PlotView(QWidget *parent = nullptr);
 
-    void setTheme(Theme theme);
+    /** Bahnenden; alles dazwischen ist der sichtbare Wertebereich. */
+    void setTrack(double minimum, double maximum);
 
-    /** Zielposition in Grad; wird als gestrichelte Linie gezeichnet. */
-    void setGoal(double degrees);
+    /** Sollposition; wird als gestrichelte goldene Linie gezeichnet. */
+    void setSetpoint(double value);
+
+    /** Einheit fuer Achse und Beschriftung, z. B. "cm". */
+    void setUnit(const QString &unit);
 
     /** Sichtbares Zeitfenster in Sekunden. 0 = gesamten Verlauf zeigen. */
     void setTimeWindow(double seconds);
 
     /** Neuen Messpunkt anhaengen. t in Sekunden seit Start. */
-    void appendSample(double t, double motorDeg, double gearDeg, double positionDeg);
+    void appendSample(double t, double value);
 
     /** Alle Messpunkte verwerfen. */
     void clearData();
@@ -65,24 +63,18 @@ private:
     struct Sample
     {
         double t = 0.0;
-        double motor = 0.0;
-        double gear = 0.0;
-        double pos = 0.0;
+        double value = 0.0;
     };
 
-    const PlotColors &colors() const;
     void rebuild();
     void computeRanges();
     void drawGrid();
     void drawWatermark();
-    void drawReferenceLines();
+    void drawTrack();
+    void drawSetpoint();
     void drawSeries();
-    void drawLegend();
 
     QPointF toScene(double t, double value) const;
-    void addSeriesPath(double Sample::*member, const QColor &color, qreal width);
-
-    Theme m_theme = Theme::Eloxal;
 
     QPixmap m_watermark;
     QPixmap m_watermarkScaled;
@@ -91,7 +83,11 @@ private:
     QVector<Sample> m_samples;
     QElapsedTimer m_repaintClock;
 
-    double m_goal = 0.0;
+    double m_trackMin = -15.0;
+    double m_trackMax = 15.0;
+    double m_setpoint = 0.0;
+    QString m_unit = QStringLiteral("cm");
+
     double m_window = 12.0;
     int m_maxSamples = 6000;
 

@@ -9,8 +9,8 @@ class dialog;
 }
 QT_END_NAMESPACE
 
-class DemoRun;
 class KnobInput;
+class MotorDial;
 class QLabel;
 class QLineEdit;
 
@@ -22,14 +22,27 @@ public:
     explicit Controller(QWidget *parent = nullptr);
     ~Controller() override;
 
+public slots:
+    /**
+     * Ein Messpunkt. Genau hier werden die echten Hardwaredaten eingespeist.
+     *   t             Sekunden seit Start
+     *   motorDeg      Winkel des geregelten Motors (Motor-Encoder), Grad
+     *   gearDeg       Winkel am Getriebeausgang (Getriebe-Encoder), Grad
+     *   ballCm        Ballposition auf der Bahn, 0 = Mitte, -15 ... +15 cm
+     *   velocity      Ballgeschwindigkeit, cm/s
+     *   acceleration  Ballbeschleunigung, cm/s^2
+     */
+    void showSample(double t, double motorDeg, double gearDeg, double ballCm,
+                    double velocity, double acceleration);
+
+protected:
+    void paintEvent(QPaintEvent *event) override;
+
 private:
     void applyCorporateFonts();
-    void loadLogo();
-    void applyGoal();
-    void resetAll();
-    void toggleDemo();
-    void showSample(double t, double motorDeg, double gearDeg, double positionDeg,
-                    double velocity, double acceleration);
+    void loadBranding();
+    void applyPid();
+    void applyMotorAngle(double degrees);
 
     // Bedienung per Drehgeber: jeder Knopf gehoert fest zu einem Feld.
     void setupKnobs();
@@ -37,18 +50,20 @@ private:
     void pressKnob(int index);
 
     Ui::dialog *ui;
-    DemoRun *m_demo;
 
     struct Knob {
         int clkGpio;
         int swGpio;
-        QLineEdit *edit;
+        QLineEdit *edit;   // PID-Feld; nullptr beim Zifferblatt
         QLabel *label;     // Beschriftung, zeigt "x10" im Grobmodus; nullptr = keine
+        MotorDial *dial;   // Zifferblatt fuer den Motorwinkel; nullptr bei PID
         double step;       // Aenderung pro Rastschritt
         double min;
         double max;
         bool coarse = false;
-        QString labelText; // urspruengliche Beschriftung
+        QString labelText = {}; // urspruengliche Beschriftung
     };
     QList<Knob> m_knobs;
+
+    QString m_coordinateFamily; // Oswald Light fuer die Koordinaten am Rand
 };
