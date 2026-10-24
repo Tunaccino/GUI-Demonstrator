@@ -1,5 +1,7 @@
 #include "controller.h"
 
+#include "boardconnection.h"
+#include "interface.h"
 #include "knobinput.h"
 #include "motordial.h"
 #include "plotview.h"
@@ -15,11 +17,80 @@
 #include <QStyle>
 #include <QSvgRenderer>
 
+#include <cmath>
+#include <optional>
+
 namespace {
 
-// Encoder-Aufloesung: hier deine echten Werte eintragen.
-constexpr double kMotorTicksPerDegree = 4096.0 / 360.0;
-constexpr double kGearTicksPerDegree = 1024.0 / 360.0;
+// Die Firmware rechnet in Festkomma (interface.h): jeder Wert mal
+// 2^FRACTION_BITS, Positionen in Steps des jeweiligen Winkelsensors.
+constexpr double kFixedPointScale = double(1 << FRACTION_BITS);
+
+// Winkel des Gelenk-Encoders (direct), bei dem das Zifferblatt 0 zeigt. Am
+// Demonstrator ablesen: Gelenk senkrecht stellen, Getriebe-Encoder ablesen.
+constexpr double kDialZeroDeg = 0.0;
+
+// Encoder 20-mal pro Sekunde abfragen; eine Abfrage braucht bei 9600 Baud
+// etwa 25 ms. Das obere Board liefert noch nichts fuer die Anzeige, dort
+// merkt die seltene Abfrage nur, wenn die Verbindung abreisst.
+constexpr int kEncoderPollMs = 50;
+constexpr int kHeartbeatMs = 1000;
+
+// Obergrenze fuer P, I und D, fuer Drehgeber und Tastatur. Negative Werte
+// machen den Regler instabil, deshalb ab 0. Die Firmware speichert die Werte
+// als int32 mal 2^FRACTION_BITS, darstellbar waere also knapp 65536. Enger ist
+// aber die Stellgroesse P * Fehler + D * Geschwindigkeit + I * Integral: Ab
+// 65536 Steps/cs^2 laeuft sie in der Firmware ueber und wechselt das
+// Vorzeichen. Bei einem Fehler von 180 Grad ist das schon bei
+// P = 65536 / (INTERFACE_STEPS_IN_ROTATION / 2) erreicht, mit Riemen 4:1 bei
+// P = 82. Schutz davor muss die Firmware bieten (Stellgroesse begrenzen).
+constexpr double kGainMax = 1000.0;
+
+// Getippte PID-Werte gelten ohne Enter, sobald eine Weile nichts mehr getippt
+// wurde. So geht beim Tippen von "140" nicht erst P = 1 und P = 14 raus.
+constexpr int kPidCheckMs = 100;
+constexpr int kTypingPauseMs = 500;
+
+const QString kNoValue = QStringLiteral("–");
+
+/** Zahl in einem PID-Feld; leer, wenn dort keine steht. Komma geht auch. */
+std::optional<double> readGain(const QLineEdit *edit)
+{
+    QString text = edit->text();
+    text.replace(QLatin1Char(','), QLatin1Char('.'));
+    bool ok = false;
+    const double value = text.toDouble(&ok);
+    if (!ok || !std::isfinite(value))
+        return std::nullopt;
+    return value;
+}
+
+// Statuspunkt der Boards: gruen verbunden, rot kein Board, gelb Fehler.
+// Gelb ist Kapton 300 aus der DARE-Palette.
+constexpr int kStatusDotSize = 12;
+const QString kStatusGreen = QStringLiteral("#3FB950");
+const QString kStatusRed = QStringLiteral("#E5534B");
+const QString kStatusYellow = QStringLiteral("#E3B64D");
+
+void showBoardStatus(QLabel *dot, BoardConnection::Health health, const QString &text)
+{
+    const QString &color = health == BoardConnection::Health::Connected ? kStatusGreen
+                         : health == BoardConnection::Health::Error     ? kStatusYellow
+                                                                        : kStatusRed;
+    dot->setStyleSheet(QStringLiteral("background: %1; border-radius: %2px;").arg(color).arg(kStatusDotSize / 2));
+    dot->setToolTip(text);
+}
+
+qint32 toFixedPoint(double value)
+{
+    return static_cast<qint32>(std::lround(value * kFixedPointScale));
+}
+
+/** Rohwert eines Winkelsensors in Grad, -180 ... +180. */
+double toDegrees(qint32 raw, int stepsInRotation)
+{
+    return std::remainder(raw / kFixedPointScale / stepsInRotation * 360.0, 360.0);
+}
 
 // Die Bahn geht von -15 bis +15 cm, 0 ist die Mitte. Geregelt wird immer auf
 // die Mitte.
@@ -75,7 +146,7 @@ void repolish(QWidget *widget)
 
 } // namespace
 
-Controller::Controller(QWidget *parent)
+Controller::Controller(const QString &lowerPort, const QString &upperPort, QWidget *parent)
     : QDialog(parent)
     , ui(new Ui::dialog)
 {
@@ -93,15 +164,26 @@ Controller::Controller(QWidget *parent)
     ui->graphicsView->setUnit(QStringLiteral("cm"));
     ui->graphicsView->setTimeWindow(12.0); // rollendes Fenster; 0 = alles zeigen
 
-    // Ohne Apply-Knopf gilt jede Aenderung sofort: Enter oder Feld verlassen
-    // bei den PID-Werten, jede Bewegung beim Zifferblatt.
-    for (QLineEdit *edit : {ui->lineEdit_3, ui->lineEdit_2, ui->lineEdit})
-        connect(edit, &QLineEdit::editingFinished, this, &Controller::applyPid);
+    // Ohne Apply-Knopf gilt jede Aenderung sofort: Drehgeber und Zifferblatt
+    // bei jeder Bewegung, getippte PID-Werte nach einer kurzen Tipp-Pause
+    // (oder gleich mit Enter). Dafuer schaut m_pidTimer regelmaessig nach.
+    for (QLineEdit *edit : {ui->lineEdit_3, ui->lineEdit_2, ui->lineEdit}) {
+        connect(edit, &QLineEdit::editingFinished, this, [this] { applyPid(); });
+        connect(edit, &QLineEdit::textEdited, this, [this] { m_pidEdited.start(); });
+    }
+    connect(&m_pidTimer, &QTimer::timeout, this, [this] {
+        if (m_pidEdited.isValid() && m_pidEdited.elapsed() >= kTypingPauseMs) {
+            m_pidEdited.invalidate();
+            applyPid();
+        }
+    });
+    m_pidTimer.start(kPidCheckMs);
 
     ui->motorDial->setRange(-kMotorAngleLimit, kMotorAngleLimit);
     connect(ui->motorDial, &MotorDial::valueChanged, this, &Controller::applyMotorAngle);
 
     setupKnobs();
+    setupBoards(lowerPort, upperPort);
 }
 
 Controller::~Controller()
@@ -295,45 +377,119 @@ void Controller::paintEvent(QPaintEvent *)
     }
 }
 
-// Wird bei jeder Aenderung von P, I oder D aufgerufen (Drehgeber oder Enter).
-void Controller::applyPid()
+// Liest P, I und D aus den Feldern und schickt sie, wenn sie sich geaendert
+// haben (force: immer, z. B. nach dem Neuverbinden). Aufgerufen von den
+// Drehgebern, von Enter und nach einer Tipp-Pause.
+void Controller::applyPid(bool force)
 {
-    auto read = [](const QLineEdit *edit) {
-        QString text = edit->text();
-        text.replace(QLatin1Char(','), QLatin1Char('.'));
-        return text.toDouble();
-    };
+    const QList<QLineEdit *> edits = {ui->lineEdit_3, ui->lineEdit_2, ui->lineEdit};
+    QList<double> gains;
+    for (qsizetype i = 0; i < edits.size(); ++i) {
+        const std::optional<double> typed = readGain(edits[i]);
+        // Keine Zahl im Feld (z. B. leer getippt): letzten gesendeten Wert zurueckholen.
+        std::optional<double> value = typed;
+        if (!value && m_sentPid.size() == edits.size())
+            value = m_sentPid[i];
+        if (!value)
+            return;
 
-    const double kp = read(ui->lineEdit_3);
-    const double ki = read(ui->lineEdit_2);
-    const double kd = read(ui->lineEdit);
+        const double bounded = qBound(0.0, *value, kGainMax);
+        if (!typed || bounded != *typed)
+            edits[i]->setText(QString::number(bounded, 'f', 1));
+        gains << bounded;
+    }
+    if (!force && gains == m_sentPid)
+        return;
+    m_sentPid = gains;
 
-    // ... hier kp, ki, kd an die echte Regelung uebergeben.
-    //     Der Sollwert ist fest kBallSetpoint (Mitte der Bahn) ...
-    Q_UNUSED(kp);
-    Q_UNUSED(ki);
-    Q_UNUSED(kd);
+    // Die Werte gehen unveraendert als Festkommazahlen an die Firmware, die
+    // Felder zeigen also die Einheiten der Firmware (1/cs^2, 1/cs^3, 1/cs).
+    // Mehrere Aenderungen kurz hintereinander fasst BoardConnection zusammen.
+    m_upper->set({{IM_PARAMETER_P, toFixedPoint(gains[0])},
+                  {IM_PARAMETER_I, toFixedPoint(gains[1])},
+                  {IM_PARAMETER_D, toFixedPoint(gains[2])}});
 }
 
-// Wird bei jeder Bewegung des Zifferblatts aufgerufen. Der Winkel geht direkt
-// an den zweiten Motor, ohne Regelung.
+// Wird bei jeder Bewegung des Zifferblatts aufgerufen. Der Winkel geht als
+// Zielposition an das Schrittmotor-Gelenk; ohne Ballregelung, die Firmware
+// faehrt ihn mit ihrem eigenen Gelenkregler an.
 void Controller::applyMotorAngle(double degrees)
 {
-    // ... hier degrees (-90 ... +90) an den Motor uebergeben ...
-    Q_UNUSED(degrees);
+    const double steps = (degrees + kDialZeroDeg) / 360.0 * INTERFACE_STEPS_IN_ROTATION;
+    m_lower->set({{IM_TARGET_POSITION, toFixedPoint(steps)}});
 }
 
-// Genau dieser Slot wird mit den echten Hardwaredaten gefuettert.
-void Controller::showSample(double t, double motorDeg, double gearDeg, double ballCm,
-                            double velocity, double acceleration)
+void Controller::showSample(double t, double ballCm, double velocity, double acceleration)
 {
     ui->graphicsView->appendSample(t, ballCm);
 
     ui->valueCurrentPosition->setText(QString::number(ballCm, 'f', 2) + QStringLiteral(" cm"));
-    ui->valueMotorEncoder->setText(QString::number(qRound(motorDeg * kMotorTicksPerDegree)));
-    ui->valueGearEncoder->setText(QString::number(qRound(gearDeg * kGearTicksPerDegree)));
     ui->valueVelocity->setText(QString::number(velocity, 'f', 2) + QStringLiteral(" cm/s"));
     ui->valueAcceleration->setText(QString::number(acceleration, 'f', 2) + QStringLiteral(" cm/s\u00B2"));
+}
+
+void Controller::showEncoders(double motorDeg, double gearDeg)
+{
+    ui->valueMotorEncoder->setText(QString::number(motorDeg, 'f', 1) + QStringLiteral(" \u00B0"));
+    ui->valueGearEncoder->setText(QString::number(gearDeg, 'f', 1) + QStringLiteral(" \u00B0"));
+}
+
+// --- Boards ----------------------------------------------------------------
+//
+// Annahme bis zur Pruefung am Demonstrator: Der Schrittmotor (unteres Board)
+// ist das Gelenk am Zifferblatt, der BLDC (oberes Board) kippt das Rohr und
+// balanciert den Ball. Stimmt das nicht, hier m_lower und m_upper tauschen.
+// Beide Encoder gehoeren zum Schrittmotor-Gelenk: direct sitzt hinter dem
+// Riemen am Gelenk, indirect an der Motorwelle.
+
+void Controller::setupBoards(const QString &lowerPort, const QString &upperPort)
+{
+    m_lowerStatus = addStatusRow(QStringLiteral("Lower Board"));
+    m_upperStatus = addStatusRow(QStringLiteral("Upper Board"));
+
+    m_lower = new BoardConnection(QStringLiteral("Lower board"), lowerPort, this);
+    m_upper = new BoardConnection(QStringLiteral("Upper board"), upperPort, this);
+
+    connect(m_lower, &BoardConnection::statusChanged, this, [this](BoardConnection::Health health, const QString &text) {
+        showBoardStatus(m_lowerStatus, health, text);
+        if (!m_lower->isConnected()) {
+            ui->valueMotorEncoder->setText(kNoValue);
+            ui->valueGearEncoder->setText(kNoValue);
+        }
+    });
+    connect(m_upper, &BoardConnection::statusChanged, this, [this](BoardConnection::Health health, const QString &text) {
+        showBoardStatus(m_upperStatus, health, text);
+    });
+
+    // Ein frisch gestartetes Board steht auf null, deshalb nach jedem
+    // (Neu-)Verbinden den aktuellen Stand der GUI uebertragen.
+    connect(m_lower, &BoardConnection::connected, this, [this] { applyMotorAngle(ui->motorDial->value()); });
+    connect(m_upper, &BoardConnection::connected, this, [this] { applyPid(true); });
+
+    m_lower->setPolling(IM_MEASURED_POSITION_DIRECT | IM_MEASURED_POSITION_INDIRECT, kEncoderPollMs);
+    connect(m_lower, &BoardConnection::valuesReceived, this, [this](const BoardConnection::Values &values) {
+        showEncoders(toDegrees(values.value(IM_MEASURED_POSITION_INDIRECT), INTERFACE_STEPS_IN_MOTOR_ROTATION),
+                     toDegrees(values.value(IM_MEASURED_POSITION_DIRECT), INTERFACE_STEPS_IN_ROTATION));
+    });
+    m_upper->setPolling(IM_PARAMETER_P, kHeartbeatMs);
+}
+
+// Neue Zeile unten in der Status-Karte: Beschriftung wie bei den Encodern,
+// rechts ein Statuspunkt. Den Klartext zeigt der Tooltip.
+QLabel *Controller::addStatusRow(const QString &caption)
+{
+    auto *captionLabel = new QLabel(caption, this);
+    captionLabel->setProperty("role", QStringLiteral("caption"));
+    captionLabel->setFont(ui->label_6->font());
+
+    auto *dot = new QLabel(this);
+    dot->setFixedSize(kStatusDotSize, kStatusDotSize);
+    showBoardStatus(dot, BoardConnection::Health::Disconnected, QStringLiteral("not connected"));
+
+    const int row = ui->statusGrid->rowCount();
+    ui->statusGrid->addWidget(captionLabel, row, 0);
+    ui->statusGrid->addWidget(dot, row, 1, Qt::AlignRight | Qt::AlignVCenter);
+    return dot;
 }
 
 // --- Drehgeber -------------------------------------------------------------
@@ -351,9 +507,9 @@ void Controller::setupKnobs()
 {
     //  CLK  SW  Feld           Beschriftung Zifferblatt     Schritt  Min    Max
     m_knobs = {
-        {21, 16, ui->lineEdit_3, ui->label_3, nullptr,        1.0,    0.0, 1000.0}, // Knopf 1: P
-        {26, 13, ui->lineEdit_2, ui->label,   nullptr,        1.0,    0.0, 1000.0}, // Knopf 2: I
-        { 6,  0, ui->lineEdit,   ui->label_2, nullptr,        0.5,    0.0, 1000.0}, // Knopf 3: D
+        {21, 16, ui->lineEdit_3, ui->label_3, nullptr,        1.0,    0.0, kGainMax}, // Knopf 1: P
+        {26, 13, ui->lineEdit_2, ui->label,   nullptr,        1.0,    0.0, kGainMax}, // Knopf 2: I
+        { 6,  0, ui->lineEdit,   ui->label_2, nullptr,        0.5,    0.0, kGainMax}, // Knopf 3: D
         {11, 10, nullptr,        nullptr,     ui->motorDial,  1.0,
          -kMotorAngleLimit, kMotorAngleLimit},                                      // Knopf 4: Motorwinkel
     };

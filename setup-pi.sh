@@ -2,7 +2,7 @@
 #
 # Richtet einen frischen Raspberry Pi fuer den GUI-Demonstrator mit vier
 # KY-040-Drehgebern ein:
-#   1. Pakete installieren (git, Compiler, CMake, Qt6 mit Svg)
+#   1. Pakete installieren (git, Compiler, CMake, Qt6 mit Svg und SerialPort)
 #   2. Code von GitHub holen
 #   3. Drehgeber in /boot/firmware/config.txt eintragen
 #   4. Programm bauen
@@ -38,7 +38,7 @@ APT_WAIT=(-o DPkg::Lock::Timeout=600)
 
 step "Pakete installieren"
 sudo apt-get "${APT_WAIT[@]}" update
-sudo apt-get "${APT_WAIT[@]}" install -y git cmake build-essential qt6-base-dev qt6-svg-dev
+sudo apt-get "${APT_WAIT[@]}" install -y git cmake build-essential qt6-base-dev qt6-svg-dev qt6-serialport-dev
 
 # ---------------------------------------------------------------------------
 step "Code holen ($BRANCH)"
